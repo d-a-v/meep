@@ -16,24 +16,55 @@ EOF
     exit 1
 }
 
-[ -z "$1" ] && echo "(use -h for help)"
+gitclone ()
+{
+    repo=${1##*/}
+    name=${repo%%.*}
+    echo $repo $name
+    if [ -d $name ]; then
+        ( cd $name; git pull; )
+    else
+        [ -z "$2" ] || branch="-b $2"
+        git clone --depth=1 $1 $branch
+    fi
+}
 
+autogensh ()
+{
+    LIB64="${DESTDIR}/lib"
+    $centos && LIB64="${DESTDIR}/lib64"
+    LLP="${LD_LIBRARY_PATH}:${LIB64}"
+    sh autogen.sh PKG_CONFIG_PATH="${PKG_CONFIG_PATH}" RPATH_FLAGS="${RPATH_FLAGS}" LDFLAGS="${LDFLAGS}" CFLAGS="${CFLAGS}" CPPFLAGS="${CPPFLAGS}" LD_LIBRARY_PATH=${LLP} \
+        --disable-static --enable-shared --prefix="${DESTDIR}" --libdir=${LIB64} \
+        --with-libctl=${DESTDIR}/share/libctl \
+        "$@"
+}
+
+compile=true
 installdeps=true
+unset DESTDIR
 
 while [ ! -z "$1" ]; do
     case "$1" in
         -h)         # help
             help "$0"
             ;;
-        -d)         # <installdir>  (default: current directory)
+        -d)         # <installdir>  (mandatory)
             DESTDIR="$2"
             shift
             ;;
         -s)         # use 'sudo' for 'make install'
             SUDO=sudo
             ;;
-        -n)         # do not check for distribution dependencies
+        -S)         # source directory (default: <installdir>/src)
+            SRCDIR="$2"
+            shift
+            ;;
+        -n)         # skip checking for distribution dependencies
             installdeps=false
+            ;;
+        -c)         # skip build+install
+            compile=false
             ;;
         *)
             echo "'$1' ?"
@@ -44,26 +75,36 @@ while [ ! -z "$1" ]; do
 done
 
 
+[ -z "${DESTDIR}" ] && { echo "-d option is missing" ; help "$0"; }
 # detect wether DESTDIR is ending with src/
-[ -z ${DESTDIR} ] && DESTDIR=$(pwd)
-[ ${DESTDIR##*/} = src ] && DESTDIR=$(cd $(pwd)/..; pwd)
-SRCDIR=${DESTDIR}/src
+[ "${DESTDIR##*/}" = src ] && DESTDIR=$(cd $(pwd)/..; pwd)
+[ -z "$SRCDIR" ] && SRCDIR=${DESTDIR}/src
 
-cat << EOF
+if $ubuntu; then
+    RPATH_FLAGS="-Wl,-rpath,${DESTDIR}/lib:/usr/lib/x86_64-linux-gnu/hdf5/openmpi"
+    LDFLAGS="-L${DESTDIR}/lib -L/usr/lib/x86_64-linux-gnu/hdf5/openmpi ${RPATH_FLAGS}"
+    CFLAGS="-I${DESTDIR}/include -I/usr/include/hdf5/openmpi"
+fi
 
-This sript will download or update sources, compile and install MEEP.
-Please ensure the following final paths fit your needs:
-    '${DESTDIR}/bin/meep'
-    '${DESTDIR}/lib/...'
-    '${DESTDIR}/share/...'
-    '${DESTDIR}/...'
-    '${SRCDIR}/<sources>'
+if $centos; then
+    export CC=/usr/lib64/openmpi/bin/mpicc
+    export CXX=/usr/lib64/openmpi/bin/mpicxx
+    export PATH=${PATH}:/usr/lib64/openmpi/bin
+    RPATH_FLAGS="-Wl,-rpath,${DESTDIR}/lib64:/usr/lib64/openmpi/lib"
+    LDFLAGS="-L${DESTDIR}/lib64 -L/usr/lib64/openmpi/lib ${RPATH_FLAGS}"
+    CFLAGS="-I${DESTDIR}/include -I/usr/include/openmpi-x86_64/"
 
-Press return to continue
-EOF
-read junk
+    showenv()
+    {
+        echo export PYTHONPATH+=:${DESTDIR}/lib/python3.6/site-packages
+        echo export PYTHONPATH+=:/usr/local/lib64/python3.6/site-packages
+        echo export LD_LIBRARY_PATH+=:${DESTDIR}/lib64
+        echo export LD_PRELOAD+=:/usr/lib64/openmpi/lib/libmpi.so
+    }
+    eval $(showenv)
+fi
 
-if ! lsb_release; then
+if ! lsb_release > /dev/null; then
     echo "Minimum requirements:"
     echo "    Ubuntu:"
     echo "        sudo apt-get -y install lsb-release sudo git"
@@ -73,7 +114,7 @@ if ! lsb_release; then
     exit 1
 fi
 
-set -ex
+set -e
 
 ubuntu=false
 centos=false
@@ -98,29 +139,6 @@ case "$distrib" in
         false
         ;;
 esac
-
-mkdir -p ${SRCDIR}
-cd ${SRCDIR}
-
-gitclone ()
-{
-    repo=${1##*/}
-    name=${repo%%.*}
-    echo $repo $name
-    if [ -d $name ]; then
-        ( cd $name; git pull; )
-    else
-        git clone --depth=1 $1
-    fi
-}
-
-autogensh ()
-{
-    sh autogen.sh PKG_CONFIG_PATH="${PKG_CONFIG_PATH}" RPATH_FLAGS="${RPATH_FLAGS}" LDFLAGS="${LDFLAGS}" CFLAGS="${CFLAGS}" CPPFLAGS="${CPPFLAGS}" \
-        --disable-static --enable-shared --prefix="${DESTDIR}" \
-        --with-libctl=${DESTDIR}/share/libctl \
-        "$@"
-}
 
 if $installdeps && $ubuntu; then
 
@@ -152,12 +170,7 @@ if $installdeps && $ubuntu; then
     sudo -H pip3 install --no-cache-dir mpi4py
     export HDF5_MPI="ON"
     sudo -H pip3 install --no-binary=h5py h5py
-    sudo -H pip3 install matplotlib>3.0.0
-
-    RPATH_FLAGS="-Wl,-rpath,${DESTDIR}/lib:/usr/lib/x86_64-linux-gnu/hdf5/openmpi"
-    LDFLAGS="-L${DESTDIR}/lib -L/usr/lib/x86_64-linux-gnu/hdf5/openmpi ${RPATH_FLAGS}"
-    CFLAGS="-I${DESTDIR}/include -I/usr/include/hdf5/openmpi"
-
+    sudo -H pip3 install matplotlib\>3.0.0
 fi
 
 if $installdeps && $centos; then
@@ -191,6 +204,12 @@ if $installdeps && $centos; then
         wget
 
     sudo yum -y install    \
+        python3            \
+        python3-devel      \
+        python36-numpy      \
+        python36-scipy
+
+    sudo yum -y install    \
         openblas-devel     \
         fftw3-devel        \
         libpng-devel       \
@@ -213,10 +232,7 @@ if $installdeps && $centos; then
         guile-devel        \
         swig
 
-    export PATH=${PATH}:/usr/lib64/openmpi/bin
-    RPATH_FLAGS="-Wl,-rpath,${DESTDIR}/lib:/usr/lib64/openmpi/lib"
-    LDFLAGS="-L${DESTDIR}/lib -L/usr/lib64/openmpi/lib ${RPATH_FLAGS}"
-    CFLAGS="-I${DESTDIR}/include -I/usr/include/openmpi-x86_64/"
+    sudo -E pip3 install mpi4py
 fi
 
 CPPFLAGS=${CFLAGS}
@@ -224,39 +240,41 @@ PKG_CONFIG_PATH=${DESDTIR}/pkgconfig
 export PKG_CONFIG_PATH
 export PATH=${DESTDIR}/bin:${PATH}
 
-mkdir -p $SRCDIR
+if $compile; then
 
-cd $SRCDIR
+mkdir -p ${SRCDIR}
+
+cd ${SRCDIR}
 gitclone https://github.com/NanoComp/harminv.git
 cd harminv/
 autogensh
 make -j && $SUDO make install
 
-cd $SRCDIR
+cd ${SRCDIR}
 gitclone https://github.com/NanoComp/libctl.git
 cd libctl/
 autogensh
 make -j && $SUDO make install
 
-cd $SRCDIR
+cd ${SRCDIR}
 gitclone https://github.com/NanoComp/h5utils.git
 cd h5utils/
 autogensh CC=mpicc
 make -j && $SUDO make install
 
-cd $SRCDIR
+cd ${SRCDIR}
 gitclone https://github.com/NanoComp/mpb.git
 cd mpb/
 autogensh CC=mpicc --with-hermitian-eps
 make -j && $SUDO make install
 
-cd $SRCDIR
+cd ${SRCDIR}
 gitclone https://github.com/HomerReid/libGDSII.git
 cd libGDSII/
 autogensh
 make -j && $SUDO make install
 
-cd $SRCDIR
+cd ${SRCDIR}
 #gitclone https://github.com/NanoComp/meep.git
 gitclone https://github.com/d-a-v/meep.git
 cd meep/
@@ -264,3 +282,35 @@ autogensh --with-mpi --with-openmp PYTHON=python3
 make -j && $SUDO make install
 
 # all done
+
+if $centos; then
+     cd ${DESTDIR}/lib/python3.6/site-packages/meep/
+     for i in ../../../../lib64/python3.6/site-packages/meep/*meep*; do
+        ln -sf $i
+     done
+fi
+
+fi # install
+
+########
+# test
+
+test=/tmp/test-meep.py
+
+cat << EOF > $test
+import meep as mp
+cell = mp.Vector3(16,8,0)
+exit()
+EOF
+
+
+echo "------------ ENV (commands)"
+showenv
+echo "------------ ENV (result)"
+echo export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}
+echo export PYTHONPATH=${PYTHONPATH}
+echo export LD_PRELOAD=${LD_PRELOAD}
+echo "------------ $test"
+cat $test
+echo "------------ EXEC python3 $test"
+python3 $test
