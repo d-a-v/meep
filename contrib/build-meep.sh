@@ -257,7 +257,8 @@ autogensh
 make -j && $SUDO make install
 
 cd $SRCDIR
-gitclone https://github.com/NanoComp/meep.git
+#gitclone https://github.com/NanoComp/meep.git
+gitclone https://github.com/d-a-v/meep.git
 cd meep/
 autogensh --with-mpi --with-openmp PYTHON=python3
 make -j && $SUDO make install
